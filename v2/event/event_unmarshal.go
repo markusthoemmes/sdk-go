@@ -315,20 +315,18 @@ func ReadJson(out *Event, reader io.Reader) error {
 	// If there is a dataToken cached, we always defer at the end the processing
 	// because nor datacontenttype or datacontentencoding are mandatory.
 	if cachedData != nil {
-		iter := jsoniter.ParseBytes(jsoniter.ConfigFastest, cachedData)
-		return consumeData(out, checkFlag(state, dataBase64Flag), iter)
+		return consumeDataAsBytes(out, checkFlag(state, dataBase64Flag), cachedData)
 	}
 	return nil
 }
 
-func consumeData(e *Event, isBase64 bool, iter *jsoniter.Iterator) error {
+func consumeDataAsBytes(e *Event, isBase64 bool, b []byte) error {
 	if isBase64 {
 		e.DataBase64 = true
 
-		// Allocate payload byte buffer
-		base64Encoded := iter.ReadStringAsSlice()
-		e.DataEncoded = make([]byte, base64.StdEncoding.DecodedLen(len(base64Encoded)))
-		len, err := base64.StdEncoding.Decode(e.DataEncoded, base64Encoded)
+		stringData := b[1 : len(b)-1] // Remove quotes from string.
+		e.DataEncoded = make([]byte, base64.StdEncoding.DecodedLen(len(stringData)))
+		len, err := base64.StdEncoding.Decode(e.DataEncoded, stringData)
 		if err != nil {
 			return err
 		}
@@ -338,14 +336,29 @@ func consumeData(e *Event, isBase64 bool, iter *jsoniter.Iterator) error {
 
 	ct := e.DataContentType()
 	if ct != ApplicationJSON && ct != TextJSON {
-		// If not json, then data is encoded as string
-		src := iter.ReadStringAsSlice()
-		e.DataEncoded = make([]byte, len(src))
-		copy(e.DataEncoded, src)
+		e.DataEncoded = b[1 : len(b)-1] // Remove quotes from string.
 		return nil
 	}
-	e.DataEncoded = iter.SkipAndReturnBytes()
+	e.DataEncoded = b
 	return nil
+}
+
+func consumeData(e *Event, isBase64 bool, iter *jsoniter.Iterator) error {
+	// Optimize base64 case by reading from a non-reusable slice instead of copying it.
+	if isBase64 {
+		e.DataBase64 = true
+
+		stringData := iter.ReadStringAsSlice()
+		e.DataEncoded = make([]byte, base64.StdEncoding.DecodedLen(len(stringData)))
+		len, err := base64.StdEncoding.Decode(e.DataEncoded, stringData)
+		if err != nil {
+			return err
+		}
+		e.DataEncoded = e.DataEncoded[0:len]
+		return nil
+	}
+
+	return consumeDataAsBytes(e, isBase64, iter.SkipAndReturnBytes())
 }
 
 func readUriRef(iter *jsoniter.Iterator) types.URIRef {
